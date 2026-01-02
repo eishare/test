@@ -187,3 +187,17 @@ echo "UUID        : $UUID"
 [ -n "$DOMAIN" ] && echo "Argo 域名   : $DOMAIN"
 [ -n "$DOMAIN" ] && echo "查询接口   : http://127.0.0.1:8080/$UUID"
 echo "=============================="
+if [ -n "$DOMAIN" ]; then
+  echo "=== Argo VLESS + WS + TLS 节点链接 ==="
+  echo "vless://$UUID@$DOMAIN:443?encryption=none&security=tls&type=ws&host=www.visa.cn&sni=$DOMAIN&fp=chrome&alpn=h3#Argo-VLESS-RealityLike"
+  echo
+fi
+
+if [ -n "$PORT" ]; then
+  echo "=== TUIC v5 直连节点链接 ==="
+  echo "tuic://$UUID@你的VPS公网IP:$PORT?congestion_control=bbr&alpn=h3&allow_insecure=1#TUIC-Direct"
+  echo "（请把“你的VPS公网IP”替换为实际 IP，可用 curl ifconfig.me 查看）"
+  echo
+fi
+
+echo "=============================="
