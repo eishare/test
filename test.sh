@@ -105,12 +105,13 @@ fi
 TUIC_JSON=""
 if echo "$MODE" | grep -q tuic; then
   PORT=$(shuf -i20000-60000 -n1)
+  PASS=$(cat /proc/sys/kernel/random/uuid | cut -d- -f1)  # 随机短 password
   TUIC_JSON=$(cat <<EOF
 ,{
   "type":"tuic",
   "listen":"::",
   "listen_port":$PORT,
-  "users":[{"uuid":"$UUID"}],
+  "users":[{"uuid":"$UUID", "password":"$PASS"}],
   "congestion_control":"bbr",
   "skip_cert_verify": true
 }
@@ -148,29 +149,40 @@ DOMAIN=""
 if echo "$MODE" | grep -q argo; then
   pkill cloudflared >/dev/null 2>&1 || true
   rm -rf ~/.cloudflared/  # 清理旧配置
-  echo "启动 Argo 隧道（兼容新版 cloudflared）..."
+  echo "启动 Argo 隧道（兼容 2026 outage，重试 5 次）..."
 
-  # 关键：加 --logfile /dev/stdout 强制输出纯文本日志到重定向文件
-  cloudflared tunnel --url http://127.0.0.1:3000 --no-autoupdate --no-tls-verify --loglevel info --logfile /dev/stdout >"$ARGO_LOG" 2>&1 &
-
-  echo "等待 Argo 域名生成（最多 90 秒）..."
-  for i in $(seq 1 90); do
-    # 用 strings 命令提取二进制日志中的可读字符串，再 grep
-    if strings "$ARGO_LOG" 2>/dev/null | grep -iq 'trycloudflare.com.*https'; then
-      DOMAIN=$(strings "$ARGO_LOG" 2>/dev/null | grep -i 'https://.*trycloudflare.com' | head -n1 | awk '{print $NF}' | sed 's/https:\/\///' | sed 's/|$//')
-      if [ -n "$DOMAIN" ]; then
-        echo "Argo 域名生成成功: $DOMAIN"
-        echo "$DOMAIN" > "$WWW/$UUID"
-        break
+  # 加重试参数 + 强制 HTTP2/IPv4
+  RETRY_COUNT=0
+  MAX_RETRIES=5
+  while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ -z "$DOMAIN" ]; do
+    cloudflared tunnel --url http://127.0.0.1:3000 --no-autoupdate --no-tls-verify --protocol http2 --edge-ip-version 4 --loglevel info --logfile /dev/stdout >"$ARGO_LOG" 2>&1 &
+    PID=$!
+    
+    # 无限等待直到域名出现或超时 120 秒
+    echo "等待 Argo 域名生成（第 $((RETRY_COUNT+1)) 次尝试）..."
+    for i in $(seq 1 120); do
+      if strings "$ARGO_LOG" 2>/dev/null | grep -iq 'trycloudflare.com.*https'; then
+        DOMAIN=$(strings "$ARGO_LOG" 2>/dev/null | grep -i 'https://.*trycloudflare.com' | head -n1 | awk '{print $NF}' | sed 's/https:\/\///' | sed 's/|$//')
+        if [ -n "$DOMAIN" ]; then
+          echo "Argo 域名生成成功: $DOMAIN"
+          echo "$DOMAIN" > "$WWW/$UUID"
+          break 2  # 跳出外层循环
+        fi
       fi
-    fi
-    sleep 1
+      sleep 1
+    done
+    
+    # 超时，重试
+    kill $PID
+    RETRY_COUNT=$((RETRY_COUNT+1))
+    echo "超时，重试 ($RETRY_COUNT/$MAX_RETRIES)..."
+    sleep 5
   done
 
   if [ -z "$DOMAIN" ]; then
-    echo "Argo 生成失败或超时"
-    echo "手动查看可读日志: strings $ARGO_LOG | grep -i trycloudflare"
-    echo "或直接运行: cloudflared tunnel --url http://127.0.0.1:3000 --no-tls-verify --loglevel info"
+    echo "Argo 生成失败（可能 outage 或网络问题）"
+    echo "手动查看: strings $ARGO_LOG | grep -i trycloudflare"
+    echo "建议: 检查 VPS 网络/DNS，或换用正式 Cloudflare Tunnel (需账号)"
   fi
 fi
 
@@ -184,7 +196,10 @@ busybox httpd -p 127.0.0.1:8080 -h "$WWW" >/dev/null 2>&1 &
 ################################
 echo
 echo "========== 部署完成 =========="
+echo
+echo "========== 部署完成 =========="
 echo "UUID : $UUID"
+[ -n "$PASS" ] && echo "TUIC Password : $PASS"
 [ -n "$PORT" ] && echo "TUIC Port : $PORT"
 [ -n "$DOMAIN" ] && echo "Argo 域名 : $DOMAIN"
 [ -n "$DOMAIN" ] && echo "查询接口 : http://127.0.0.1:8080/$UUID"
@@ -192,10 +207,11 @@ echo
 
 if [ -n "$PORT" ]; then
   echo "=== TUIC v5 直连节点链接（推荐使用）==="
-  echo "tuic://$UUID@$VPS_IP:$PORT?congestion_control=bbr&alpn=h3&allow_insecure=1&server_name=www.bing.com#TUIC-Bing-SNI"
+  echo "tuic://$UUID:$PASS@$VPS_IP:$PORT?congestion_control=bbr&alpn=h3&allow_insecure=1&sni=www.bing.com#TUIC-Bing-SNI"
   echo
-  echo "直接复制以上链接到 v2rayN 导入（最新版支持）"
-  echo "如果导入失败：手动添加节点 → 允许不安全连接 + SNI 填 www.bing.com"
+  echo "直接复制到 v2rayN 导入（确保 v2rayN 是最新版，支持 TUIC v5）"
+  echo "如果导入失败/显示 hysteria2: 手动添加 → 类型 TUIC v5, UUID: $UUID, Password: $PASS, 端口 $PORT, 允许不安全连接, SNI: www.bing.com"
+  echo "连通测试: telnet $VPS_IP $PORT (应连接成功); ufw allow $PORT/udp (开放端口)"
 fi
 
 if [ -n "$DOMAIN" ]; then
@@ -205,6 +221,4 @@ if [ -n "$DOMAIN" ]; then
 fi
 
 echo "VPS 公网 IP : $VPS_IP"
-echo "=============================="
-
 echo "=============================="
