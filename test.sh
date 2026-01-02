@@ -145,15 +145,25 @@ nohup sing-box run -c "$BASE/config.json" >/dev/null 2>&1 &
 DOMAIN=""
 if echo "$MODE" | grep -q argo; then
   pkill cloudflared >/dev/null 2>&1 || true
-
-  cloudflared tunnel \
-    --url http://127.0.0.1:3000 \
-    --no-autoupdate >"$ARGO_LOG" 2>&1 &
-
-  # 等待生成临时域名
-  sleep 3
-  DOMAIN=$(grep -o 'https://[^ ]*trycloudflare.com' "$ARGO_LOG" | head -n1 | sed 's#https://##')
-  echo "$DOMAIN" > "$WWW/$UUID"
+  cloudflared tunnel --url http://127.0.0.1:3000 --no-autoupdate --loglevel info >"$ARGO_LOG" 2>&1 &
+  
+  # 等待最多 30 秒，直到日志出现 trycloudflare.com 域名
+  echo "正在等待 Argo 隧道生成域名（最多 30 秒）..."
+  for i in $(seq 1 30); do
+    if grep -q 'trycloudflare.com' "$ARGO_LOG"; then
+      DOMAIN=$(grep -o 'https://[^ ]*trycloudflare.com' "$ARGO_LOG" | head -n1 | sed 's#https://##')
+      if [ -n "$DOMAIN" ]; then
+        echo "$DOMAIN" > "$WWW/$UUID"
+        break
+      fi
+    fi
+    sleep 1
+  done
+  
+  if [ -z "$DOMAIN" ]; then
+    echo "警告: Argo 隧道生成失败，请手动查看日志: cat $ARGO_LOG"
+    echo "常见原因: 网络慢、QUIC 被阻断，或 Cloudflare 临时问题"
+  fi
 fi
 
 ################################
