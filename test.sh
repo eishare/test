@@ -145,14 +145,16 @@ nohup sing-box run -c "$BASE/config.json" >/dev/null 2>&1 &
 DOMAIN=""
 if echo "$MODE" | grep -q argo; then
   pkill cloudflared >/dev/null 2>&1 || true
-  cloudflared tunnel --url http://127.0.0.1:3000 --no-autoupdate --loglevel info >"$ARGO_LOG" 2>&1 &
+  rm -rf ~/.cloudflared/  # 清理旧 config
+  echo "启动 Argo 隧道（加 no-tls-verify 兼容新版）..."
+  cloudflared tunnel --url http://127.0.0.1:3000 --no-autoupdate --no-tls-verify --loglevel info >"$ARGO_LOG" 2>&1 &
   
-  # 等待最多 30 秒，直到日志出现 trycloudflare.com 域名
-  echo "正在等待 Argo 隧道生成域名（最多 30 秒）..."
-  for i in $(seq 1 30); do
-    if grep -q 'trycloudflare.com' "$ARGO_LOG"; then
-      DOMAIN=$(grep -o 'https://[^ ]*trycloudflare.com' "$ARGO_LOG" | head -n1 | sed 's#https://##')
+  # 等待最多 90 秒（有时注册慢）
+  for i in $(seq 1 90); do
+    if grep -i 'trycloudflare.com' "$ARGO_LOG" | grep -q https; then
+      DOMAIN=$(grep -i 'trycloudflare.com' "$ARGO_LOG" | grep -o 'https://[^ ]*trycloudflare.com' | head -n1 | sed 's#https://##')
       if [ -n "$DOMAIN" ]; then
+        echo "Argo 域名: $DOMAIN"
         echo "$DOMAIN" > "$WWW/$UUID"
         break
       fi
@@ -161,8 +163,8 @@ if echo "$MODE" | grep -q argo; then
   done
   
   if [ -z "$DOMAIN" ]; then
-    echo "警告: Argo 隧道生成失败，请手动查看日志: cat $ARGO_LOG"
-    echo "常见原因: 网络慢、QUIC 被阻断，或 Cloudflare 临时问题"
+    echo "Argo 生成失败，查看日志: cat $ARGO_LOG"
+    echo "手动运行测试: cloudflared tunnel --url http://127.0.0.1:3000 --no-tls-verify --loglevel debug"
   fi
 fi
 
