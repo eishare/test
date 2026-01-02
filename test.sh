@@ -145,26 +145,30 @@ nohup sing-box run -c "$BASE/config.json" >/dev/null 2>&1 &
 DOMAIN=""
 if echo "$MODE" | grep -q argo; then
   pkill cloudflared >/dev/null 2>&1 || true
-  rm -rf ~/.cloudflared/  # 清理旧 config
-  echo "启动 Argo 隧道（加 no-tls-verify 兼容新版）..."
-  cloudflared tunnel --url http://127.0.0.1:3000 --no-autoupdate --no-tls-verify --loglevel info >"$ARGO_LOG" 2>&1 &
-  
-  # 等待最多 90 秒（有时注册慢）
+  rm -rf ~/.cloudflared/  # 清理旧配置
+  echo "启动 Argo 隧道（兼容新版 cloudflared）..."
+
+  # 关键：加 --logfile /dev/stdout 强制输出纯文本日志到重定向文件
+  cloudflared tunnel --url http://127.0.0.1:3000 --no-autoupdate --no-tls-verify --loglevel info --logfile /dev/stdout >"$ARGO_LOG" 2>&1 &
+
+  echo "等待 Argo 域名生成（最多 90 秒）..."
   for i in $(seq 1 90); do
-    if grep -i 'trycloudflare.com' "$ARGO_LOG" | grep -q https; then
-      DOMAIN=$(grep -i 'trycloudflare.com' "$ARGO_LOG" | grep -o 'https://[^ ]*trycloudflare.com' | head -n1 | sed 's#https://##')
+    # 用 strings 命令提取二进制日志中的可读字符串，再 grep
+    if strings "$ARGO_LOG" 2>/dev/null | grep -iq 'trycloudflare.com.*https'; then
+      DOMAIN=$(strings "$ARGO_LOG" 2>/dev/null | grep -i 'https://.*trycloudflare.com' | head -n1 | awk '{print $NF}' | sed 's/https:\/\///' | sed 's/|$//')
       if [ -n "$DOMAIN" ]; then
-        echo "Argo 域名: $DOMAIN"
+        echo "Argo 域名生成成功: $DOMAIN"
         echo "$DOMAIN" > "$WWW/$UUID"
         break
       fi
     fi
     sleep 1
   done
-  
+
   if [ -z "$DOMAIN" ]; then
-    echo "Argo 生成失败，查看日志: cat $ARGO_LOG"
-    echo "手动运行测试: cloudflared tunnel --url http://127.0.0.1:3000 --no-tls-verify --loglevel debug"
+    echo "Argo 生成失败或超时"
+    echo "手动查看可读日志: strings $ARGO_LOG | grep -i trycloudflare"
+    echo "或直接运行: cloudflared tunnel --url http://127.0.0.1:3000 --no-tls-verify --loglevel info"
   fi
 fi
 
