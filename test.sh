@@ -1,108 +1,114 @@
 #!/bin/sh
 set -e
 
-### ===== 基本变量 =====
+MODE="$*"
 UUID=$(cat /proc/sys/kernel/random/uuid)
 BASE=/etc/sing-box
 BIN=/usr/bin/sing-box
 ARGO_LOG=/tmp/argo.log
-WEB=/var/www/html
+WWW=/var/www/html
 
-mkdir -p $BASE $WEB
+mkdir -p $BASE $WWW
 
-### ===== 系统检测 =====
+# ===== OS =====
 if [ -f /etc/alpine-release ]; then
   PKG="apk add --no-cache"
-  WEB_SVC="lighttpd"
+  $PKG curl ca-certificates busybox-extras >/dev/null
 else
   PKG="apt-get update && apt-get install -y"
-  WEB_SVC="nginx"
+  $PKG curl ca-certificates busybox >/dev/null
 fi
 
-$PKG curl ca-certificates $WEB_SVC >/dev/null 2>&1
-
-### ===== 安装 sing-box =====
+# ===== sing-box =====
 if [ ! -f "$BIN" ]; then
   ARCH=$(uname -m)
   case "$ARCH" in
     x86_64) A=amd64 ;;
     aarch64) A=arm64 ;;
   esac
-  curl -L -o /tmp/sb.tgz \
-    https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-$A.tar.gz
+  curl -L -o /tmp/sb.tgz https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-$A.tar.gz
   tar -xzf /tmp/sb.tgz -C /tmp
   mv /tmp/sing-box-*/sing-box $BIN
   chmod +x $BIN
 fi
 
-### ===== 安装 cloudflared =====
-if [ ! -f /usr/bin/cloudflared ]; then
-  ARCH=$(uname -m)
-  case "$ARCH" in
-    x86_64) A=amd64 ;;
-    aarch64) A=arm64 ;;
-  esac
-  curl -L -o /usr/bin/cloudflared \
-    https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$A
-  chmod +x /usr/bin/cloudflared
+# ===== cloudflared =====
+if echo "$MODE" | grep -q argo; then
+  if [ ! -f /usr/bin/cloudflared ]; then
+    ARCH=$(uname -m)
+    case "$ARCH" in
+      x86_64) A=amd64 ;;
+      aarch64) A=arm64 ;;
+    esac
+    curl -L -o /usr/bin/cloudflared \
+      https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$A
+    chmod +x /usr/bin/cloudflared
+  fi
 fi
 
-### ===== 生成 TUIC 端口 =====
-TUIC_PORT=$(shuf -i20000-60000 -n1)
+# ===== TUIC =====
+TUIC_JSON=""
+if echo "$MODE" | grep -q tuic; then
+  PORT=$(echo "$MODE" | sed -n 's/.*tuic"\([^"]*\)".*/\1/p')
+  [ -z "$PORT" ] && PORT=$(shuf -i20000-60000 -n1)
+  TUIC_JSON=$(cat <<EOF
+,{
+  "type":"tuic",
+  "listen":"::",
+  "listen_port":$PORT,
+  "users":[{"uuid":"$UUID"}],
+  "congestion_control":"bbr"
+}
+EOF
+)
+fi
 
-### ===== sing-box 配置 =====
+# ===== sing-box config =====
 cat > $BASE/config.json <<EOF
 {
   "log": { "disabled": true },
   "inbounds": [
     {
-      "type": "tuic",
-      "listen": "::",
-      "listen_port": $TUIC_PORT,
-      "users": [{ "uuid": "$UUID" }],
-      "congestion_control": "bbr",
-      "zero_rtt_handshake": true
-    },
-    {
-      "type": "vless",
-      "listen": "127.0.0.1",
-      "listen_port": 3000,
-      "users": [{ "uuid": "$UUID" }],
-      "transport": {
-        "type": "ws",
-        "path": "/$UUID"
-      }
+      "type":"vless",
+      "listen":"127.0.0.1",
+      "listen_port":3000,
+      "users":[{"uuid":"$UUID"}],
+      "transport":{"type":"ws","path":"/$UUID"}
     }
+    $TUIC_JSON
   ],
-  "outbounds": [{ "type": "direct" }]
+  "outbounds":[{"type":"direct"}]
 }
 EOF
 
 pkill sing-box || true
 nohup sing-box run -c $BASE/config.json >/dev/null 2>&1 &
 
-### ===== 启动 Argo =====
-pkill cloudflared || true
-nohup cloudflared tunnel --url http://127.0.0.1:3000 \
-  --no-autoupdate > $ARGO_LOG 2>&1 &
+# ===== Argo =====
+if echo "$MODE" | grep -q argo; then
+  pkill cloudflared || true
+  FIXED=$(echo "$MODE" | sed -n 's/.*argo"\([^"]*\)".*/\1/p')
 
-sleep 2
+  if [ -z "$FIXED" ]; then
+    cloudflared tunnel --url http://127.0.0.1:3000 \
+      --no-autoupdate > $ARGO_LOG 2>&1 &
+  else
+    cloudflared tunnel --hostname "$FIXED" \
+      --url http://127.0.0.1:3000 --no-autoupdate > $ARGO_LOG 2>&1 &
+  fi
 
-ARGO_DOMAIN=$(grep -o 'https://.*trycloudflare.com' $ARGO_LOG | head -n1 | sed 's#https://##')
+  sleep 2
+  DOMAIN=$(grep -o 'https://.*trycloudflare.com' $ARGO_LOG | head -n1 | sed 's#https://##')
+  echo "$DOMAIN" > $WWW/$UUID
+fi
 
-### ===== 发布查询接口 =====
-echo "$ARGO_DOMAIN" > $WEB/$UUID
+# ===== HTTP query =====
+busybox httpd -p 80 -h $WWW >/dev/null 2>&1 &
 
-### ===== 输出信息 =====
 echo
-echo "===================================="
-echo " TUIC + Argo 双协议节点部署完成"
-echo "===================================="
-echo "UUID           : $UUID"
-echo "TUIC Port      : $TUIC_PORT"
-echo "WS Path        : /$UUID"
-echo "Argo Domain    : $ARGO_DOMAIN"
-echo
-echo "查询接口："
-echo "http://<VPS_IP>/$UUID"
-echo "===================================="
+echo "========== 部署完成 =========="
+echo "UUID        : $UUID"
+[ -n "$PORT" ] && echo "TUIC Port   : $PORT"
+[ -n "$DOMAIN" ] && echo "Argo 域名   : $DOMAIN"
+[ -n "$DOMAIN" ] && echo "查询接口   : http://VPS_IP/$UUID"
+echo "=============================="
