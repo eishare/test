@@ -63,12 +63,22 @@ if [ ! -x "$BIN" ]; then
     *) echo "不支持的架构"; exit 1 ;;
   esac
 
-  curl -L -o /tmp/sb.tgz \
-    https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-$A.tar.gz
+  # 获取最新版本号和精确文件名
+  LATEST_JSON=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest)
+  VERSION=$(echo "$LATEST_JSON" | grep '"tag_name"' | cut -d'"' -f4)
+  PACKAGE=$(echo "$LATEST_JSON" | grep '"name"' | grep "sing-box-${VERSION:1}-linux-$A.tar.gz" | cut -d'"' -f4)
 
+  if [ -z "$PACKAGE" ]; then
+    echo "获取 sing-box 下载链接失败"
+    exit 1
+  fi
+
+  curl -L -o /tmp/sb.tgz \
+    "https://github.com/SagerNet/sing-box/releases/download/$VERSION/$PACKAGE"
   tar -xzf /tmp/sb.tgz -C /tmp
   mv /tmp/sing-box-*/sing-box "$BIN"
   chmod +x "$BIN"
+  rm -rf /tmp/sb.tgz /tmp/sing-box-*
 fi
 
 ################################
