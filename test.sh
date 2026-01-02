@@ -1,6 +1,8 @@
 #!/bin/sh
 set -e
 
+VPS_IP=$(curl -s ifconfig.me || echo "未知IP")
+
 MODE="$*"
 UUID="$(cat /proc/sys/kernel/random/uuid)"
 BASE=/etc/sing-box
@@ -182,22 +184,27 @@ busybox httpd -p 127.0.0.1:8080 -h "$WWW" >/dev/null 2>&1 &
 ################################
 echo
 echo "========== 部署完成 =========="
-echo "UUID        : $UUID"
-[ -n "$PORT" ] && echo "TUIC Port   : $PORT"
-[ -n "$DOMAIN" ] && echo "Argo 域名   : $DOMAIN"
-[ -n "$DOMAIN" ] && echo "查询接口   : http://127.0.0.1:8080/$UUID"
-echo "=============================="
+echo "UUID : $UUID"
+[ -n "$PORT" ] && echo "TUIC Port : $PORT"
+[ -n "$DOMAIN" ] && echo "Argo 域名 : $DOMAIN"
+[ -n "$DOMAIN" ] && echo "查询接口 : http://127.0.0.1:8080/$UUID"
+echo
+
+if [ -n "$PORT" ]; then
+  echo "=== TUIC v5 直连节点链接（推荐使用）==="
+  echo "tuic://$UUID@$VPS_IP:$PORT?congestion_control=bbr&alpn=h3&allow_insecure=1&server_name=www.bing.com#TUIC-Bing-SNI"
+  echo
+  echo "直接复制以上链接到 v2rayN 导入（最新版支持）"
+  echo "如果导入失败：手动添加节点 → 允许不安全连接 + SNI 填 www.bing.com"
+fi
+
 if [ -n "$DOMAIN" ]; then
   echo "=== Argo VLESS + WS + TLS 节点链接 ==="
-  echo "vless://$UUID@$DOMAIN:443?encryption=none&security=tls&type=ws&host=www.visa.cn&sni=$DOMAIN&fp=chrome&alpn=h3#Argo-VLESS-RealityLike"
+  echo "vless://$UUID@$DOMAIN:443?encryption=none&security=tls&type=ws&host=www.bing.com&sni=$DOMAIN&fp=chrome&alpn=h3#Argo-VLESS-Bing"
   echo
 fi
 
-if [ -n "$PORT" ]; then
-  echo "=== TUIC v5 直连节点链接 ==="
-  echo "tuic://$UUID@你的VPS公网IP:$PORT?congestion_control=bbr&alpn=h3&allow_insecure=1#TUIC-Direct"
-  echo "（请把“你的VPS公网IP”替换为实际 IP，可用 curl ifconfig.me 查看）"
-  echo
-fi
+echo "VPS 公网 IP : $VPS_IP"
+echo "=============================="
 
 echo "=============================="
