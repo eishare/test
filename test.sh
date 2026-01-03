@@ -4,14 +4,16 @@ set -e
 MODE="$*"
 UUID=$(cat /proc/sys/kernel/random/uuid)
 PASS=$(cat /proc/sys/kernel/random/uuid | cut -d- -f1)
+
 BASE=/etc/sing-box
 BIN=/usr/bin/sing-box
+CERT_DIR=/etc/tuic-cert
 WWW=/var/www/html
 ARGO_LOG=/tmp/argo.log
-CERT_DIR=/etc/tuic-cert
-VPS_IP=$(curl -s ifconfig.me || hostname -I | awk '{print $1}')
 
-mkdir -p "$BASE" "$WWW" "$CERT_DIR"
+VPS_IP=$(curl -s -4 ifconfig.me || hostname -I | awk '{print $1}')
+
+mkdir -p "$BASE" "$CERT_DIR" "$WWW"
 
 ################################
 # 依赖
@@ -31,17 +33,19 @@ if [ ! -x "$BIN" ]; then
   case "$ARCH" in
     x86_64) A=amd64 ;;
     aarch64) A=arm64 ;;
-    *) echo "unsupported arch"; exit 1 ;;
+    *) echo "不支持架构"; exit 1 ;;
   esac
+
   VER=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep tag_name | cut -d\" -f4)
-  curl -L -o /tmp/sb.tgz https://github.com/SagerNet/sing-box/releases/download/$VER/sing-box-linux-$A.tar.gz
+  curl -L -o /tmp/sb.tgz \
+    https://github.com/SagerNet/sing-box/releases/download/$VER/sing-box-linux-$A.tar.gz
   tar -xzf /tmp/sb.tgz -C /tmp
   mv /tmp/sing-box-*/sing-box "$BIN"
   chmod +x "$BIN"
 fi
 
 ################################
-# 自签 TLS（TUIC 必须）
+# TUIC 证书（必须）
 ################################
 if [ ! -f "$CERT_DIR/cert.pem" ]; then
   openssl req -x509 -nodes -newkey rsa:2048 \
@@ -51,9 +55,6 @@ if [ ! -f "$CERT_DIR/cert.pem" ]; then
     -subj "/CN=www.bing.com"
 fi
 
-################################
-# 端口
-################################
 PORT=$(shuf -i20000-60000 -n1)
 
 ################################
@@ -61,7 +62,7 @@ PORT=$(shuf -i20000-60000 -n1)
 ################################
 cat > "$BASE/config.json" <<EOF
 {
-  "log": { "disabled": true },
+  "log": { "level": "warn" },
   "inbounds": [
     {
       "type": "vless",
@@ -72,12 +73,13 @@ cat > "$BASE/config.json" <<EOF
     },
     {
       "type": "tuic",
-      "listen": "::",
+      "listen": "0.0.0.0",
       "listen_port": $PORT,
       "users": [{ "uuid": "$UUID", "password": "$PASS" }],
       "congestion_control": "bbr",
       "tls": {
         "enabled": true,
+        "server_name": "www.bing.com",
         "certificate_path": "$CERT_DIR/cert.pem",
         "key_path": "$CERT_DIR/key.pem",
         "alpn": ["h3"]
@@ -90,6 +92,8 @@ EOF
 
 pkill sing-box 2>/dev/null || true
 nohup sing-box run -c "$BASE/config.json" >/dev/null 2>&1 &
+
+sleep 2
 
 ################################
 # Argo
@@ -109,9 +113,14 @@ if echo "$MODE" | grep -q argo; then
 
   pkill cloudflared 2>/dev/null || true
   cloudflared tunnel --url http://127.0.0.1:3000 --no-autoupdate >"$ARGO_LOG" 2>&1 &
-  sleep 5
 
-  DOMAIN=$(grep -oE 'https://[-a-z0-9]+\.trycloudflare\.com' "$ARGO_LOG" | head -n1 | sed 's#https://##')
+  echo "等待 Argo 域名生成..."
+  for i in $(seq 1 60); do
+    DOMAIN=$(grep -oE 'https://[-a-z0-9]+\.trycloudflare\.com' "$ARGO_LOG" | head -n1 | sed 's#https://##')
+    [ -n "$DOMAIN" ] && break
+    sleep 1
+  done
+
   [ -n "$DOMAIN" ] && echo "$DOMAIN" > "$WWW/$UUID"
 fi
 
@@ -122,19 +131,19 @@ busybox httpd -p 127.0.0.1:8080 -h "$WWW" >/dev/null 2>&1 &
 ################################
 echo
 echo "=========== 部署完成 ==========="
-echo "UUID        : $UUID"
-echo "Password    : $PASS"
-echo "TUIC Port   : $PORT"
-[ -n "$DOMAIN" ] && echo "Argo 域名   : $DOMAIN"
+echo "UUID      : $UUID"
+echo "Password  : $PASS"
+echo "TUIC Port : $PORT"
+[ -n "$DOMAIN" ] && echo "Argo 域名 : $DOMAIN"
 echo
 
-echo "=== TUIC v5 节点（v2rayN）==="
-echo "tuic://$UUID:$PASS@$VPS_IP:$PORT?alpn=h3&congestion_control=bbr&allow_insecure=1&sni=www.bing.com#TUIC-SkipTLS"
+echo "=== TUIC v5（可直连）==="
+echo "tuic://$UUID:$PASS@$VPS_IP:$PORT?alpn=h3&congestion_control=bbr&allow_insecure=1&sni=www.bing.com#TUIC-OK"
 echo
 
 if [ -n "$DOMAIN" ]; then
-  echo "=== Argo VLESS WS 节点 ==="
-  echo "vless://$UUID@$DOMAIN:443?encryption=none&security=tls&type=ws&path=/$UUID&host=www.bing.com&sni=$DOMAIN&allowInsecure=1#Argo-VLESS"
+  echo "=== Argo VLESS WS ==="
+  echo "vless://$UUID@$DOMAIN:443?encryption=none&security=tls&type=ws&path=/$UUID&host=www.bing.com&sni=$DOMAIN&allowInsecure=1#Argo-OK"
 fi
 
 echo
