@@ -84,7 +84,7 @@ if [ ! -x "$BIN" ]; then
 fi
 
 ################################
-# 安装 cloudflared（可选）
+# 安装 cloudflare
 ################################
 if echo "$MODE" | grep -q argo; then
   if [ ! -x /usr/bin/cloudflared ]; then
@@ -113,7 +113,8 @@ if echo "$MODE" | grep -q tuic; then
   "listen_port":$PORT,
   "users":[{"uuid":"$UUID", "password":"$PASS"}],
   "congestion_control":"bbr",
-  "skip_cert_verify": true
+  \"tls\": {\"enabled\": true, \"alpn\": [\"h3\"], \"certificate_path\": \"${FILE_PATH}/cert.pem\", \"key_path\": \"${FILE_PATH}/private.key\"}
+    },"; \
 }
 EOF
 )
