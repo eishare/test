@@ -112,19 +112,27 @@ if echo "$MODE" | grep -q argo; then
   fi
 
   pkill cloudflared 2>/dev/null || true
+  rm -f "$ARGO_LOG"
+
   cloudflared tunnel --url http://127.0.0.1:3000 --no-autoupdate >"$ARGO_LOG" 2>&1 &
 
-  echo "等待 Argo 域名生成..."
+  echo "等待 Argo 临时域名生成（最长 60 秒）..."
+
   for i in $(seq 1 60); do
-    DOMAIN=$(grep -oE 'https://[-a-z0-9]+\.trycloudflare\.com' "$ARGO_LOG" | head -n1 | sed 's#https://##')
-    [ -n "$DOMAIN" ] && break
+    DOMAIN=$(strings "$ARGO_LOG" | grep -oE 'https://[-a-z0-9]+\.trycloudflare\.com' | head -n1 | sed 's#https://##')
+    if [ -n "$DOMAIN" ]; then
+      echo "Argo 域名获取成功: $DOMAIN"
+      echo "$DOMAIN" > "$WWW/$UUID"
+      break
+    fi
     sleep 1
   done
 
-  [ -n "$DOMAIN" ] && echo "$DOMAIN" > "$WWW/$UUID"
+  if [ -z "$DOMAIN" ]; then
+    echo "❌ Argo 域名生成失败"
+    echo "调试命令：strings $ARGO_LOG | head -n 50"
+  fi
 fi
-
-busybox httpd -p 127.0.0.1:8080 -h "$WWW" >/dev/null 2>&1 &
 
 ################################
 # 输出
