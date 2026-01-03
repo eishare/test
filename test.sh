@@ -80,3 +80,18 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now sing-box argo
+
+if [[ -n "$ARGO_DOMAIN" ]]; then
+  ARGO_LINK="vless://${UUID}@${ARGO_DOMAIN}:443?encryption=none&security=tls&type=ws&host=${ARGO_DOMAIN}&path=${WS_PATH}#Argo-VLESS-WS"
+  echo
+  echo "===== Argo 节点 ====="
+  echo "$ARGO_LINK"
+fi
+
+if [[ -n "$TUIC_PORT" ]]; then
+  TUIC_LINK="tuic://${UUID}:@${DOMAIN}:${TUIC_PORT}?congestion_control=bbr&udp_relay_mode=native&alpn=h3&allow_insecure=1#TUIC-${TUIC_PORT}"
+  echo
+  echo "===== TUIC 节点 ====="
+  echo "$TUIC_LINK"
+fi
+
