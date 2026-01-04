@@ -1,7 +1,7 @@
 
 安装
 ```
-curl -Ls https://raw.githubusercontent.com/eishare/test/main/test.sh | bash -s tuic"" argo""
+curl -Ls https://raw.githubusercontent.com/eishare/test/main/test.sh | bash -s tuic="" argo="0"
 ```
 
 
