@@ -1,122 +1,177 @@
-#!/usr/bin/env bash
+#!/usr/bin/env sh
 set -e
 
-### ===== 基础变量 =====
+### ========= 解析参数 =========
+for arg in "$@"; do
+  case "$arg" in
+    tuic=*) tuic="${arg#tuic=}" ;;
+    argo=*) argo="${arg#argo=}" ;;
+  esac
+done
+
+### ========= 基础 =========
 WORK=/etc/sing-box
-BIN=$WORK/sing-box
-CFG=$WORK/config.json
-ARGO=$WORK/argo
+UUID=$(cat /proc/sys/kernel/random/uuid)
+PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 24)
+SERVER_IP=$(curl -s ip.sb || curl -s ifconfig.me)
+RAND_PORT=$(shuf -i 20000-40000 -n 1)
 
-mkdir -p $WORK
-cd $WORK
+mkdir -p "$WORK"
+cd "$WORK"
 
-### ===== 架构判断 =====
+### ========= TUIC 端口 =========
+if [ -z "$tuic" ]; then
+  TUIC_PORT="$RAND_PORT"
+else
+  TUIC_PORT="$tuic"
+fi
+
+### ========= 架构 =========
 ARCH=$(uname -m)
 case "$ARCH" in
-  x86_64)  A=amd64 ;;
+  x86_64) A=amd64 ;;
   aarch64) A=arm64 ;;
   *) echo "unsupported arch"; exit 1 ;;
 esac
 
-### ===== 下载二进制 =====
-curl -fsSL https://$A.ssss.nyc.mn/sbx -o $BIN
-curl -fsSL https://$A.ssss.nyc.mn/bot -o $ARGO
-chmod +x $BIN $ARGO
+### ========= 下载 =========
+curl -fsSL https://$A.ssss.nyc.mn/sbx -o sing-box
+curl -fsSL https://$A.ssss.nyc.mn/bot -o argo-bin
+chmod +x sing-box argo-bin
 
-### ===== 生成参数 =====
-UUID=$(cat /proc/sys/kernel/random/uuid)
-PASS=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 16)
-TUIC_PORT=$(shuf -i20000-65000 -n1)
-
-### ===== 自签证书（TUIC 用）=====
+### ========= TLS =========
 openssl ecparam -genkey -name prime256v1 -out key.pem
-openssl req -new -x509 -days 3650 \
-  -key key.pem -out cert.pem \
-  -subj "/CN=cloudflare.com"
+openssl req -new -x509 -days 3650 -key key.pem -out cert.pem -subj "/CN=www.bing.com"
 
-### ===== sing-box 配置 =====
-cat > $CFG <<EOF
+### ========= sing-box =========
+cat > config.json <<EOF
 {
-  "log": { "level": "error" },
-
+  "log": { "disabled": true },
   "inbounds": [
-    {
-      "type": "vless",
-      "listen": "127.0.0.1",
-      "listen_port": 8001,
-      "users": [{ "uuid": "$UUID" }],
-      "transport": {
-        "type": "grpc",
-        "service_name": "grpc"
-      },
-      "tls": { "enabled": false }
-    },
     {
       "type": "tuic",
       "listen": "::",
       "listen_port": $TUIC_PORT,
-      "users": [{
-        "uuid": "$UUID",
-        "password": "$PASS"
-      }],
+      "users": [
+        { "uuid": "$UUID", "password": "$PASS" }
+      ],
       "congestion_control": "bbr",
       "tls": {
         "enabled": true,
-        "certificate_path": "$WORK/cert.pem",
-        "key_path": "$WORK/key.pem"
+        "alpn": ["h3"],
+        "certificate_path": "cert.pem",
+        "key_path": "key.pem"
+      }
+    },
+    {
+      "type": "vless",
+      "listen": "127.0.0.1",
+      "listen_port": 8080,
+      "users": [{ "uuid": "$UUID" }],
+      "transport": {
+        "type": "ws",
+        "path": "/argo"
       }
     }
   ],
-
   "outbounds": [{ "type": "direct" }]
 }
 EOF
 
-### ===== systemd =====
+### ========= 判断系统 =========
+if [ -x /sbin/openrc-run ]; then
+  INIT=alpine
+else
+  INIT=systemd
+fi
+
+### ========= Argo 行为 =========
+if [ "$argo" = "0" ]; then
+  # 临时隧道
+  ARGO_CMD="$WORK/argo-bin tunnel --url http://127.0.0.1:8080 --protocol http2"
+  NEED_REFRESH=1
+else
+  # 固定隧道（argo=域名）
+  ARGO_CMD="$WORK/argo-bin tunnel --protocol http2 --hostname $argo"
+  NEED_REFRESH=0
+fi
+
+### ========= 服务 =========
+if [ "$INIT" = "systemd" ]; then
+
 cat > /etc/systemd/system/sing-box.service <<EOF
-[Unit]
-After=network.target
 [Service]
-ExecStart=$BIN run -c $CFG
+ExecStart=$WORK/sing-box run -c $WORK/config.json
 Restart=always
-LimitNOFILE=51200
-[Install]
-WantedBy=multi-user.target
 EOF
 
 cat > /etc/systemd/system/argo.service <<EOF
-[Unit]
-After=network.target
 [Service]
-ExecStart=$ARGO tunnel --url http://127.0.0.1:8001 --no-autoupdate
+ExecStart=$ARGO_CMD
 Restart=always
-StandardOutput=append:/var/log/argo.log
-StandardError=append:/var/log/argo.log
-[Install]
-WantedBy=multi-user.target
+RestartSec=5
 EOF
 
 systemctl daemon-reload
 systemctl enable --now sing-box argo
 
-sleep 3
+if [ "$NEED_REFRESH" = "1" ]; then
+cat > /etc/systemd/system/argo-refresh.timer <<EOF
+[Timer]
+OnCalendar=hourly
+Persistent=true
+EOF
 
-### ===== 解析 Argo 临时域名 =====
-ARGO_DOMAIN=$(grep -oE 'https://[-0-9a-z]+\.trycloudflare.com' /var/log/argo.log | tail -n1 | sed 's#https://##')
-SERVER_IP=$(curl -fsSL https://api.ipify.org)
+cat > /etc/systemd/system/argo-refresh.service <<EOF
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl restart argo
+EOF
 
-### ===== 输出节点 =====
-echo
-echo "========== 节点信息 =========="
-
-if [[ -n "$ARGO_DOMAIN" ]]; then
-  echo
-  echo "[Argo - VLESS gRPC]"
-  echo "vless://${UUID}@${ARGO_DOMAIN}:443?type=grpc&serviceName=grpc&security=tls#Argo-gRPC"
+systemctl enable --now argo-refresh.timer
 fi
 
-echo
-echo "[TUIC]"
-echo "tuic://${UUID}:${PASS}@${SERVER_IP}:${TUIC_PORT}?congestion_control=bbr&alpn=h3&allow_insecure=1#TUIC"
+else
+# ========= Alpine =========
 
-echo "=============================="
+cat > /etc/init.d/sing-box <<EOF
+#!/sbin/openrc-run
+command="$WORK/sing-box"
+command_args="run -c $WORK/config.json"
+command_background=true
+EOF
+
+cat > /etc/init.d/argo <<EOF
+#!/sbin/openrc-run
+command="$ARGO_CMD"
+command_background=true
+EOF
+
+chmod +x /etc/init.d/sing-box /etc/init.d/argo
+rc-update add sing-box default
+rc-update add argo default
+rc-service sing-box start
+rc-service argo start
+
+if [ "$NEED_REFRESH" = "1" ]; then
+( crontab -l 2>/dev/null; echo "0 * * * * rc-service argo restart" ) | crontab -
+fi
+
+fi
+
+### ========= 输出订阅 =========
+sleep 6
+
+if [ "$argo" = "0" ]; then
+  DOMAIN=$(grep -oE '[a-z0-9-]+\.trycloudflare.com' /var/log/* 2>/dev/null | tail -1)
+else
+  DOMAIN="$argo"
+fi
+
+cat > sub.txt <<EOF
+tuic://$UUID:$PASS@$SERVER_IP:$TUIC_PORT?sni=www.bing.com&congestion_control=bbr&udp_relay_mode=native&alpn=h3&allow_insecure=1#TUIC
+vless://$UUID@$DOMAIN:443?encryption=none&security=tls&type=ws&path=/argo#ARGO
+EOF
+
+echo "========== 订阅 =========="
+cat sub.txt
