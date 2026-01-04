@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -e
 
-### ========= 解析参数 =========
+### ========= 参数解析 =========
 for arg in "$@"; do
   case "$arg" in
     tuic=*) tuic="${arg#tuic=}" ;;
@@ -20,11 +20,7 @@ mkdir -p "$WORK"
 cd "$WORK"
 
 ### ========= TUIC 端口 =========
-if [ -z "$tuic" ]; then
-  TUIC_PORT="$RAND_PORT"
-else
-  TUIC_PORT="$tuic"
-fi
+[ -z "$tuic" ] && TUIC_PORT="$RAND_PORT" || TUIC_PORT="$tuic"
 
 ### ========= 架构 =========
 ARCH=$(uname -m)
@@ -52,9 +48,7 @@ cat > config.json <<EOF
       "type": "tuic",
       "listen": "::",
       "listen_port": $TUIC_PORT,
-      "users": [
-        { "uuid": "$UUID", "password": "$PASS" }
-      ],
+      "users": [{ "uuid": "$UUID", "password": "$PASS" }],
       "congestion_control": "bbr",
       "tls": {
         "enabled": true,
@@ -68,17 +62,14 @@ cat > config.json <<EOF
       "listen": "127.0.0.1",
       "listen_port": 8080,
       "users": [{ "uuid": "$UUID" }],
-      "transport": {
-        "type": "ws",
-        "path": "/argo"
-      }
+      "transport": { "type": "ws", "path": "/argo" }
     }
   ],
   "outbounds": [{ "type": "direct" }]
 }
 EOF
 
-### ========= 判断系统 =========
+### ========= 系统判断 =========
 if [ -x /sbin/openrc-run ]; then
   INIT=alpine
 else
@@ -86,30 +77,44 @@ else
 fi
 
 ### ========= Argo 行为 =========
+ARGO_LOG="$WORK/argo.log"
+
 if [ "$argo" = "0" ]; then
-  # 临时隧道
   ARGO_CMD="$WORK/argo-bin tunnel --url http://127.0.0.1:8080 --protocol http2"
   NEED_REFRESH=1
 else
-  # 固定隧道（argo=域名）
   ARGO_CMD="$WORK/argo-bin tunnel --protocol http2 --hostname $argo"
   NEED_REFRESH=0
 fi
 
-### ========= 服务 =========
+### ========= systemd =========
 if [ "$INIT" = "systemd" ]; then
 
 cat > /etc/systemd/system/sing-box.service <<EOF
+[Unit]
+After=network.target
+
 [Service]
 ExecStart=$WORK/sing-box run -c $WORK/config.json
 Restart=always
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
 cat > /etc/systemd/system/argo.service <<EOF
+[Unit]
+After=network.target
+
 [Service]
 ExecStart=$ARGO_CMD
+StandardOutput=append:$ARGO_LOG
+StandardError=append:$ARGO_LOG
 Restart=always
 RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
@@ -120,6 +125,9 @@ cat > /etc/systemd/system/argo-refresh.timer <<EOF
 [Timer]
 OnCalendar=hourly
 Persistent=true
+
+[Install]
+WantedBy=timers.target
 EOF
 
 cat > /etc/systemd/system/argo-refresh.service <<EOF
@@ -132,7 +140,7 @@ systemctl enable --now argo-refresh.timer
 fi
 
 else
-# ========= Alpine =========
+### ========= Alpine =========
 
 cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
@@ -159,15 +167,16 @@ fi
 
 fi
 
-### ========= 输出订阅 =========
+### ========= 解析域名（关键修复点） =========
 sleep 6
 
 if [ "$argo" = "0" ]; then
-  DOMAIN=$(grep -oE '[a-z0-9-]+\.trycloudflare.com' /var/log/* 2>/dev/null | tail -1)
+  DOMAIN=$(grep -oE '[a-z0-9-]+\.trycloudflare.com' "$ARGO_LOG" | tail -1)
 else
   DOMAIN="$argo"
 fi
 
+### ========= 输出订阅 =========
 cat > sub.txt <<EOF
 tuic://$UUID:$PASS@$SERVER_IP:$TUIC_PORT?sni=www.bing.com&congestion_control=bbr&udp_relay_mode=native&alpn=h3&allow_insecure=1#TUIC
 vless://$UUID@$DOMAIN:443?encryption=none&security=tls&type=ws&path=/argo#ARGO
